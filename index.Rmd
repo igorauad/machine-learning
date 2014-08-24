@@ -1,0 +1,157 @@
+---
+title: "Practical Machine Learning - Assignment 1"
+author: "Igor Freire"
+date: "August 24th, 2014"
+output: html_document
+---
+
+## Step 1: Loading Data
+
+First of all, the training and testing data sets (*.csv* files) should be read. Note, while doing this, entries as "NA", "" (empty) or "#DIV/0!" (datasheet software error caused when dividing by 0) should be interpreted as NAs.
+
+```{r, message=FALSE }
+setwd("/Users/igorfreire/Documents/Coursera/Practical Machine Learning/Assignment");
+library(caret); library(ggplot2); library(reshape2);
+
+# Import csv, according to: http://stat.ethz.ch/R-manual/R-devel/library/utils/html/read.table.html
+# Both empty strings ("") and NA should be interpreted as NA's:
+trainSet <- read.csv("pml-training.csv", header = TRUE, na.strings = c("NA", "", "#DIV/0!"))
+testSet <- read.csv("pml-testing.csv", header = TRUE, na.strings = c("NA", "", "#DIV/0!"))
+```
+
+Once the two sets are loaded, by inspecting their content, it is possible to conclude there is a need for eliminating unnecessary features (columns). This is because many columns are entirely filled by zeros or NAs, which means they don't add any information to support the desired prediction. In addition, there are some variables such as timestamps and indexing, which should also be removed from the set (in this case, time information is not relevant).
+
+This is done by the following block of code:
+```{r }
+# Remove empty columns in both the training and test sets:
+trainSet <- trainSet[, colSums(is.na(trainSet)) == 0]
+testSet <- testSet[, colSums(is.na(testSet)) == 0]
+# This should eliminate 100 columns
+
+# Now, remove other factor variables and timestamps:
+unnecessaryVars = c("X",
+  		   "user_name",
+			   "raw_timestamp_part_1",
+			   "raw_timestamp_part_2",
+			   "cvtd_timestamp", 
+			   "new_window")
+
+trainSet <- trainSet[, -match(unnecessaryVars, colnames(trainSet))]		
+testSet <- testSet[, -match(unnecessaryVars, colnames(testSet))]
+```
+
+At this point, the following features are available for prediction:
+
+```{r }
+# Available features:
+features <- colnames(trainSet)
+features <- features[-length(trainSet)] #exclude 'classe' field
+features
+```
+
+## Step 2: Prepare for Cross-Validation
+
+The training set provided in the *.csv* file is again divided into 2 subsets: a training and a test set. This is necessary for cross-validation, since this testing subset can be used to test the model several times, while the original testing set (from imported *.csv* file) can be used only once for a more accurate performance analysis.
+
+The following code divides the original training set into two sub-sets:
+```{r, message=FALSE }
+# Split training set into a sub-training and sub-test set (for cross-validation)
+inTrain <- createDataPartition(y=trainSet$classe, p=0.6, list=FALSE)    	   
+training <- trainSet[inTrain, ]
+testing <- trainSet[-inTrain, ]
+```
+
+## Step 3: Inspect Features
+
+### Feature Plot
+
+In this step, the features are observed in a feature plot, provided by the following code:
+```{r}
+# Feature Plot 
+featurePlot(x = training[, features], y = training$classe, plot = "strip")
+```
+
+Note it is nearly not possible to observe any strong relationship between the "classe" variable and the features.
+
+### Corellation Matrix
+In this step, the correlation between the features is analyzed. The goal is to assert if the features are highly correlated, because in this case the number of variables used for prediction can be reduced (highly correlated variables can be linearly combined). 
+
+First, the **correlation matrix** is computed:
+```{r}
+# Find correlated predictors
+M <- abs(cor(training[, -54])) 
+diag(M) <- 0
+```
+
+Then, the correlation heat map is plotted:
+```{r, ggplot2ex, echo = FALSE}
+p <- ggplot(data=melt(M), aes(x=Var1, y=Var2, fill=value)) + geom_tile() + scale_fill_gradient(low = "white", high = "steelblue")
+base_size <- 9
+p + theme_grey(base_size = base_size) + labs(x = "",  y = "") + scale_x_discrete(expand = c(0, 0)) +     scale_y_discrete(expand = c(0, 0)) +  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+Note many features present high correlation (above 80%) with others. Hence, it is appropriate to reduce the number of predictors.
+
+## Step 4: Principal Component Analysis
+
+In this step, the goal is to obtain a reduced amount of predictors with respect to the number of features, while maintaining most of the variance in the original set. For this, the 53 features are pre-processed with **principal component analysis**, according to the following code:
+```{r}
+set.seed(835)
+# As in pg 12/15 of the lecture material:
+preProc <- preProcess(training[, -54], method="pca", thresh = 0.95)
+preProc
+```
+
+## Step 5: Model Training with Cross-Validation
+
+In this step, the model is trained using principal components. The first requirement is to predict the principal components of both trainign and testing set:
+
+```{r}
+# Predict Principal Components for training set:
+trainingPC <- predict(preProc, training[, -54])
+# Predict Principal Components for testing set:
+testingPC <- predict(preProc, testing[, -54])
+```
+
+Next, the model for predicting the "classe" based on the PC is trained, using k-fold cross-valiadtion with 10 folds and Support Vector Machine algorithm, which was chosen due to its verified reasonable performance:
+
+```{r}
+# Use the training Principal compoentes to train the model
+fitControl <- trainControl(method = "cv", # k-fold cross-validation                        
+                          number = 10) # 10-fold                        
+
+modelFit <- train(training$classe ~ ., 
+                  method = "svmRadial", 
+                  data = trainingPC, 
+                  trControl = fitControl, 
+                  importance = TRUE)
+```
+
+
+## Step 6: Assess Model Accuracy
+
+In this step, the model performance is assessed in the testing sub-set (obtained from the original training set). The code and the result are as follows:
+```{r}
+# Predict the "classe" using the model and the predicted testing principal components:
+confusionMtx <- confusionMatrix(testing$classe, predict(modelFit, testingPC))
+confusionMtx
+```
+
+### Out-of-sample Error
+
+Given the accuracy of the model, the expected out-of-sample error rate can be computed as:
+
+```{r}
+outOfSampleError <- 1 - confusionMtx$overall[[1]]
+outOfSampleError
+```
+
+## Step 7: Predict Values
+
+In the final step, the classe for the 20 testing entries in the original testing set is predicted:
+```{r}
+# Predict values
+testSetPC <- predict(preProc, testSet[, -54])
+predictedValues <- predict(modelFit, testSetPC)
+predictedValues
+```
